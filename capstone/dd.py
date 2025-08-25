@@ -1,0 +1,321 @@
+from ai_edge_litert.interpreter import Interpreter
+import sys
+import numpy as np
+import sounddevice as sd
+import scipy.signal
+import collections
+import zipfile
+import RPi.GPIO as GPIO
+import time
+from PIL import Image, ImageDraw, ImageFont
+import ST7735
+import csv
+import math
+
+# --- 설정값 ---
+VIBRATION_PIN = 13
+CHUNK_DURATION = 2.0
+SLIDE_STEP = 1.0
+ORIGINAL_RATE = 48000
+TARGET_RATE = 16000
+CHANNELS = 2
+NORMALIZATION_BIT_DEPTH = 32
+MAX_VAL_FOR_NORMALIZATION = 2 ** (NORMALIZATION_BIT_DEPTH - 1)
+MIN_RMS_THRESHOLD = 0.01  # 반응할 최소 소리 크기 (소음 필터링)
+DIRECTION_LABELS = ["왼쪽", "오른쪽"]
+MODEL_INPUT_SAMPLES = 15600
+SMOOTHING_WINDOW = 2
+STOP_BUTTON_PIN = 17
+START_BUTTON_PIN = 22
+
+# --- 디스플레이 설정 ---
+disp = ST7735.ST7735(
+    port=0,
+    cs=0,
+    dc=25,
+    backlight=24,
+    rst=27,
+    width=128,
+    height=128,
+    rotation=180,
+    offset_left=2,
+    offset_top=1,
+    invert=False
+)
+
+WIDTH = disp.width
+HEIGHT = disp.height
+scaled_width = 32
+scaled_height = 32
+
+# --- 리소스 경로 및 설정 ---
+category_image = {
+    '1': '/home/pi/capstone/1.jpg',
+    '2': '/home/pi/capstone/2.jpg',
+    '3': '/home/pi/capstone/3.jpg',
+    '4': '/home/pi/capstone/4.jpg',
+    '5': '/home/pi/capstone/5.jpg',
+    '6': '/home/pi/capstone/6.jpg',
+}
+
+sound_category = {
+    317: '1', 318: '1', 319: '1', 390: '1', 391: '1', 392: '1', 393: '1', 394: '1', 396: '1',
+    302: '2', 303: '2', 304: '2', 312: '2', 325: '2', 306: '2', 307: '2',
+    420: '3', 421: '3', 422: '3', 423: '3', 424: '3', 428: '3', 429: '3', 430: '3',
+    433: '4', 434: '4', 437: '4', 454: '4', 455: '4', 460: '4', 462: '4', 463: '4', 464: '4', 478: '4', 480: '4', 483: '4', 486: '4',
+    313: '5', 475: '5', 355: '5',
+    6: '6', 7: '6', 9: '6', 10: '6', 11: '6', 479: '6',
+}
+
+duty_dict = {
+    '1': [20, 50, 30, 0], '2': [20, 20, 20, 20], '3': [50, 0, 50, 0],
+    '4': [10, 20, 30, 40, 50], '5': [50, 40, 30, 20, 10], '6': [50, 50, 50, 50]
+}
+
+# --- 폰트 및 이미지 객체 ---
+font = ImageFont.load_default()
+
+def display_startup_image(image_path, duration=3):
+    """시작 이미지를 표시하는 함수"""
+    try:
+        startup_img = Image.open(image_path).resize((WIDTH, HEIGHT), Image.LANCZOS)
+        disp.display(startup_img)
+        time.sleep(duration)
+    except Exception as e:
+        print(f"시작 이미지 로드 실패: {e}")
+        time.sleep(duration)
+
+def calculate_peak_rms(audio_chunk, percentile=95):
+    """오디오 청크의 피크 RMS를 계산하는 함수"""
+    abs_chunk = np.abs(audio_chunk)
+    threshold = np.percentile(abs_chunk, percentile)
+    peaks = abs_chunk[abs_chunk >= threshold]
+    return np.mean(peaks) if peaks.size > 0 else 0
+
+def main_application():
+    """메인 애플리케이션 (실시간 소리 분석 + 개선된 디스플레이 출력)"""
+    print("메인 애플리케이션 시작. 리소스를 초기화합니다.")
+
+    # GPIO 설정
+    GPIO.setup(STOP_BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(VIBRATION_PIN, GPIO.OUT)
+
+    # PWM 객체 생성
+    pwm = GPIO.PWM(VIBRATION_PIN, 100)
+    pwm.start(0)
+
+    # 모델 및 관련 리소스 로드
+    model_path = '/home/pi/capstone/yamnet-tflite-classification-tflite-v1/1.tflite'
+    interpreter = Interpreter(model_path)
+    interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    result_buffer = collections.deque(maxlen=SMOOTHING_WINDOW)
+    labels_file = zipfile.ZipFile(model_path).open('yamnet_label_list.txt')
+    class_names = [l.decode('utf-8').strip() for l in labels_file.readlines()]
+
+    print(f"\n실시간 소리 감지 시작 (종료 버튼: GPIO {STOP_BUTTON_PIN})")
+    buffer = np.zeros((int(CHUNK_DURATION * ORIGINAL_RATE), CHANNELS), dtype=np.int32)
+
+    # --- 메인 애플리케이션 루프 ---
+    while True:
+        if GPIO.input(STOP_BUTTON_PIN) == GPIO.LOW:
+            time.sleep(1)
+            break
+        
+        
+        new_samples = int(SLIDE_STEP * ORIGINAL_RATE)
+        recording = sd.rec(new_samples, samplerate=ORIGINAL_RATE, channels=CHANNELS, dtype='int32', device='hw:3,0')
+        sd.wait()
+
+        # 버퍼 업데이트
+        buffer = np.roll(buffer, -new_samples, axis=0)
+        buffer[-new_samples:, :] = recording
+
+        # --- 파이프라인 A: 방향 탐지 (소리 세기 비교) ---
+        waveform_float_multi = buffer.astype(np.float32) / MAX_VAL_FOR_NORMALIZATION
+        rms_values = [calculate_peak_rms(waveform_float_multi[:, i]) for i in range(CHANNELS)]
+        loudest_channel_index = np.argmax(rms_values)
+        max_rms = rms_values[loudest_channel_index]
+
+        # 소리가 임계값보다 작으면 무시
+        if max_rms < MIN_RMS_THRESHOLD:
+            print("소리 감지 대기 중...", " " * 40, end='\r')
+            continue
+
+        detected_direction = DIRECTION_LABELS[loudest_channel_index]
+
+        # --- 파이프라인 B: 소리 분류 (YAMNet) ---
+        waveform_mono = np.mean(waveform_float_multi, axis=1)
+
+        # 리샘플링
+        if ORIGINAL_RATE != TARGET_RATE:
+            num_target = int(len(waveform_mono) * TARGET_RATE / ORIGINAL_RATE)
+            waveform_resampled = scipy.signal.resample(waveform_mono, num_target)
+        else:
+            waveform_resampled = waveform_mono
+
+        # 입력 길이 맞춤(패딩/자르기)
+        if len(waveform_resampled) > MODEL_INPUT_SAMPLES:
+            waveform_resampled = waveform_resampled[:MODEL_INPUT_SAMPLES]
+        elif len(waveform_resampled) < MODEL_INPUT_SAMPLES:
+            padding = np.zeros(MODEL_INPUT_SAMPLES - len(waveform_resampled))
+            waveform_resampled = np.concatenate([waveform_resampled, padding])
+
+        waveform_resampled = np.squeeze(waveform_resampled)
+        input_shape = tuple(input_details[0]['shape'])
+        if input_shape == (15600,):
+            interpreter.set_tensor(input_details[0]['index'], waveform_resampled.astype(np.float32))
+        elif input_shape == (1, 15600):
+            input_tensor = np.expand_dims(waveform_resampled, axis=0).astype(np.float32)
+            interpreter.set_tensor(input_details[0]['index'], input_tensor)
+        else:
+            raise ValueError(f"예상치 못한 입력 shape: {input_shape}")
+
+        interpreter.invoke()
+        scores = interpreter.get_tensor(output_details[0]['index'])
+
+        # 출력 shape이 (1, N)일 경우 1차원으로 변환
+        if len(scores.shape) == 2 and scores.shape[0] == 1:
+            scores = scores[0]
+
+        # 클래스 개수 일치 확인
+        if len(scores) != len(class_names):
+            print("모델 출력 shape가 비정상입니다. 입력 shape와 데이터 확인 필요.")
+            continue
+
+        top_class_index = np.argmax(scores)
+        predicted_class = class_names[top_class_index]
+        confidence = scores[top_class_index]
+
+        # 후처리(다수결 스무딩)
+        result_buffer.append(predicted_class)
+        most_common = max(set(result_buffer), key=result_buffer.count)
+        print(f" 방향:{detected_direction:<10} 최종 감지 소리: {most_common:<20} (신뢰도: {confidence:.2f})", end='\r\n')
+        print(f"L채널: {rms_values[0]:.5f}         R채널: {rms_values[1]:.5f}")
+        '''
+        # 1. 오디오 녹음
+        new_samples = int(SLIDE_STEP * ORIGINAL_RATE)
+        recording = sd.rec(new_samples, samplerate=ORIGINAL_RATE, channels=CHANNELS, dtype='int32', device='hw:3,0')
+        sd.wait()
+
+        # 2. 버퍼 업데이트
+        buffer = np.roll(buffer, -new_samples, axis=0)
+        buffer[-new_samples:, :] = recording
+        waveform_float_multi = buffer.astype(np.float32) / MAX_VAL_FOR_NORMALIZATION
+
+        # 3. 방향 탐지
+        rms_values = [calculate_peak_rms(waveform_float_multi[:, i]) for i in range(CHANNELS)]
+
+        if not rms_values or max(rms_values) < MIN_RMS_THRESHOLD:
+            # print("소리 감지 대기 중...", " " * 40, end='\r')
+            # 대기 중일 때는 기본 배경화면 표시
+            try:
+                idle_image = Image.open("/home/pi/capstone/bgi.jpg").resize((WIDTH, HEIGHT), Image.LANCZOS)
+                disp.display(idle_image)
+            except:
+                pass # 실패 시 그냥 둠
+            continue
+
+        loudest_channel_index = np.argmax(rms_values)
+        detected_direction = DIRECTION_LABELS[loudest_channel_index]
+
+        # 4. 소리 분류 (YAMNet)
+        waveform_mono = np.mean(waveform_float_multi, axis=1)
+        num_target = int(len(waveform_mono) * TARGET_RATE / ORIGINAL_RATE)
+        waveform_resampled = scipy.signal.resample(waveform_mono, num_target)
+
+        if len(waveform_resampled) < MODEL_INPUT_SAMPLES:
+            padding = np.zeros(MODEL_INPUT_SAMPLES - len(waveform_resampled))
+            waveform_resampled = np.concatenate([waveform_resampled, padding])
+        else:
+            waveform_resampled = waveform_resampled[:MODEL_INPUT_SAMPLES]
+
+        input_tensor = np.expand_dims(waveform_resampled, axis=0).astype(np.float32)
+        interpreter.set_tensor(input_details[0]['index'], input_tensor)
+        interpreter.invoke()
+        scores = interpreter.get_tensor(output_details[0]['index'])[0]
+
+        top_class_index = np.argmax(scores)
+        predicted_class = class_names[top_class_index]
+        confidence = scores[top_class_index]
+        result_buffer.append(predicted_class)
+        most_common = max(set(result_buffer), key=result_buffer.count)
+
+        print(f"방향: {detected_direction:<5} | 최종 감지: {most_common:<20} | 신뢰도: {confidence:.2f}")
+        '''
+        # 5. 결과 표시 (개선된 디스플레이 로직 적용)
+        idx = class_names.index(most_common)
+        if idx in sound_category.keys() and confidence >= 0.5:
+            # --- 여기부터 디스플레이 로직 시작 ---
+            try:
+                final_image = Image.open("/home/pi/capstone/bgi.jpg").resize((WIDTH, HEIGHT), Image.LANCZOS)
+                draw = ImageDraw.Draw(final_image)
+            except Exception as e:
+                print(f"배경 이미지 로드 실패: {e}")
+                final_image = Image.new('RGB', (WIDTH, HEIGHT), (0, 0, 0))
+                draw = ImageDraw.Draw(final_image)
+
+            category = sound_category[idx]
+            img_path = category_image.get(category)
+            if img_path:
+                try:
+                    icon_img = Image.open(img_path).resize((scaled_width, scaled_height), Image.LANCZOS)
+                    icon_x = (WIDTH - scaled_width) // 2
+                    icon_y = 72
+                    final_image.paste(icon_img, (icon_x, icon_y), icon_img if icon_img.mode == 'RGBA' else None)
+                except Exception as e:
+                    print(f'아이콘 이미지 로드 실패: {e}')
+
+            bbox = draw.textbbox((0, 0), most_common, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            text_x = (WIDTH - text_width) // 2
+            text_y = (HEIGHT - text_height) // 2 - 10
+            draw.text((text_x, text_y), most_common, font=font, fill=(255, 255, 255))
+
+            if not (0.9 < rms_values[0] / (rms_values[1] + 1e-6) < 1.1):
+                if detected_direction == '왼쪽':
+                    draw.text((icon_x - 20, icon_y + 8), "<-", font=font, fill=(255, 255, 0))
+                else:
+                    draw.text((icon_x + scaled_width + 10, icon_y + 8), "->", font=font, fill=(255, 255, 0))
+
+            disp.display(final_image)
+            # --- 여기까지 디스플레이 로직 끝 ---
+
+            # 6. 진동 피드백
+            for duty in duty_dict[category]:
+                pwm.ChangeDutyCycle(duty)
+                time.sleep(0.5)
+            pwm.ChangeDutyCycle(0)
+
+    # --- 리소스 정리 ---
+    print("\n메인 애플리케이션 리소스를 정리합니다.")
+    pwm.stop()
+
+# =============================================
+# === 프로그램의 메인 진입점 (상태 머신) ===
+# =============================================
+if __name__ == "__main__":
+    try:
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(START_BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        display_startup_image("/home/pi/capstone/start_image.jpeg", 3)
+
+        img = Image.new('RGB', (WIDTH, HEIGHT), (0, 0, 0))
+        disp.display(img)
+
+        while True:
+            print("\n[대기 모드] 시작 버튼을 누르세요...")
+            while GPIO.input(START_BUTTON_PIN) == GPIO.HIGH:
+                time.sleep(0.01)
+
+            print("시작 버튼 감지! 1초 후 감지를 시작합니다.")
+            time.sleep(1)
+
+            main_application()
+
+    except KeyboardInterrupt:
+        print("\n프로그램을 종료합니다.")
+    finally:
+        GPIO.cleanup()
