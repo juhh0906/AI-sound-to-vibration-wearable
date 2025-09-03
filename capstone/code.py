@@ -224,7 +224,7 @@ def main_application():
             text_y = (HEIGHT - text_height) // 2 - 10
             draw.text((text_x, text_y), most_common, font=font, fill=(255, 255, 255))
 
-            if not (0.99 < rms_values[0] / rms_values[1] < 1.01):
+            if not (0.9 < rms_values[0] / rms_values[1] < 1.1):
                 if detected_direction == '왼쪽':
                     draw.text((icon_x - 20, icon_y + 8), "<-", font=font, fill=(255, 255, 0))
                 else:
