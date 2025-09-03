@@ -21,7 +21,7 @@ TARGET_RATE = 16000
 CHANNELS = 2
 NORMALIZATION_BIT_DEPTH = 32
 MAX_VAL_FOR_NORMALIZATION = 2 ** (NORMALIZATION_BIT_DEPTH - 1)
-MIN_RMS_THRESHOLD = 0.01  # 반응할 최소 소리 크기 (소음 필터링)
+MIN_RMS_THRESHOLD = 0.01
 DIRECTION_LABELS = ["왼쪽", "오른쪽"]
 MODEL_INPUT_SAMPLES = 15600
 SMOOTHING_WINDOW = 2
@@ -135,6 +135,7 @@ def main_application():
         # --- DECIDING DIRECTION (VOLUME COMPARISON)  ---
         waveform_float_multi = buffer.astype(np.float32) / MAX_VAL_FOR_NORMALIZATION
         rms_values = [calculate_peak_rms(waveform_float_multi[:, i]) for i in range(CHANNELS)]
+        rms_values[0] *= 1.05
         loudest_channel_index = np.argmax(rms_values)
         max_rms = rms_values[loudest_channel_index]
 
@@ -193,6 +194,7 @@ def main_application():
 
         # --- OUTPUT ---
         idx = class_names.index(most_common)
+        display_startup_image("AI-sound-to-vibration-wearable/capstone/bgi.jpg"), 0.001)
         if idx in sound_category.keys() and confidence >= 0.4:
             # VISUAL FEEDBACK VIA DISPLAY
             try:
