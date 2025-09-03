@@ -51,12 +51,12 @@ scaled_height = 32
 
 # --- SYMBOL IMAGE PATHS ---
 category_image = {
-    '1': '/AI-sound-to-vibration-wearable/pi/capstone/1.jpg',
-    '2': '/AI-sound-to-vibration-wearable/pi/capstone/2.jpg',
-    '3': '/AI-sound-to-vibration-wearable/pi/capstone/3.jpg',
-    '4': '/AI-sound-to-vibration-wearable/pi/capstone/4.jpg',
-    '5': '/AI-sound-to-vibration-wearable/pi/capstone/5.jpg',
-    '6': '/AI-sound-to-vibration-wearable/pi/capstone/6.jpg',
+    '1': '/2025ESWContest_free_SOS/capstone/1.jpg',
+    '2': '/2025ESWContest_free_SOS/capstone/2.jpg',
+    '3': '/2025ESWContest_free_SOS/capstone/3.jpg',
+    '4': '/2025ESWContest_free_SOS/capstone/4.jpg',
+    '5': '/2025ESWContest_free_SOS/capstone/5.jpg',
+    '6': '/2025ESWContest_free_SOS/capstone/6.jpg',
 }
 
 # --- TARGETED SOUNDS ---
@@ -105,7 +105,7 @@ def main_application():
     pwm.start(0)
 
     # MODEL LOADING
-    model_path = '/home/pi/capstone/yamnet-tflite-classification-tflite-v1/1.tflite'
+    model_path = '/2025ESWContest_free_SOS/capstone/yamnet-tflite-classification-tflite-v1/1.tflite'
     interpreter = Interpreter(model_path)
     interpreter.allocate_tensors()
     input_details = interpreter.get_input_details()
@@ -194,11 +194,11 @@ def main_application():
 
         # --- OUTPUT ---
         idx = class_names.index(most_common)
-        display_startup_image("AI-sound-to-vibration-wearable/capstone/bgi.jpg"), 0.001)
+        display_startup_image("/2025ESWContest_free_SOS/capstone/bgi.jpg"), 0.001)
         if idx in sound_category.keys() and confidence >= 0.4:
             # VISUAL FEEDBACK VIA DISPLAY
             try:
-                final_image = Image.open("/home/pi/capstone/bgi.jpg").resize((WIDTH, HEIGHT), Image.LANCZOS)
+                final_image = Image.open("/2025ESWContest_free_SOS/capstone/bgi.jpg").resize((WIDTH, HEIGHT), Image.LANCZOS)
                 draw = ImageDraw.Draw(final_image)
             except Exception as e:
                 print(f"배경 이미지 로드 실패: {e}")
@@ -251,7 +251,7 @@ if __name__ == "__main__":
     try:
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(START_BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        display_startup_image("/home/pi/capstone/start_image.jpeg", 3)
+        display_startup_image("/2025ESWContest_free_SOS/capstone/start_image.jpeg", 3)
 
         img = Image.new('RGB', (WIDTH, HEIGHT), (0, 0, 0))
         disp.display(img)
@@ -266,7 +266,7 @@ if __name__ == "__main__":
             print("시작 버튼 감지! 1초 후 감지를 시작합니다.")
             time.sleep(1)
 
-            display_startup_image("/home/pi/capstone/bgi.jpg", 0.01)
+            display_startup_image("/2025ESWContest_free_SOS/capstone/bgi.jpg", 0.01)
             time.sleep(1) # 버튼 채터링(떨림) 방지 및 사용자 인지 시간
             main_application()
             img = Image.new('RGB', (WIDTH, HEIGHT), (0, 0, 0))
